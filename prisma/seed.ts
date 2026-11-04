@@ -7,7 +7,7 @@ const hash = (pw: string) => bcrypt.hashSync(pw, 10);
 // Quyền theo miền. '*' = toàn quyền (QTV).
 const PERMISSIONS: Record<string, string> = {
   '*': 'super',
-  'patient.read': 'HOSPITAL', 'patient.write': 'HOSPITAL',
+  'patient.read': 'HOSPITAL', 'patient.write': 'HOSPITAL', 'patient.self': 'HOSPITAL',
   'encounter.read': 'HOSPITAL', 'encounter.write': 'HOSPITAL', 'encounter.exam': 'HOSPITAL',
   'encounter.prescribe': 'HOSPITAL', 'order.write': 'HOSPITAL',
   'emr.read': 'HOSPITAL', 'emr.sign': 'HOSPITAL',
@@ -29,7 +29,7 @@ const ROLES: Record<string, { name: string; space: string; perms: string[] }> = 
   DS: { name: 'Dược sĩ', space: 'HOSPITAL', perms: ['pharmacy.read', 'pharmacy.write', 'patient.read'] },
   KT: { name: 'Kế toán/Viện phí', space: 'HOSPITAL', perms: ['billing.read', 'billing.write', 'patient.read', 'report.read'] },
   LD: { name: 'Lãnh đạo', space: 'HOSPITAL', perms: ['report.read', 'bed.read', 'ai.use'] },
-  NB: { name: 'Người bệnh', space: 'HOSPITAL', perms: ['patient.read'] },
+  NB: { name: 'Người bệnh', space: 'HOSPITAL', perms: ['patient.self'] },
   PM: { name: 'Quản lý dự án', space: 'HUB', perms: ['hub.read', 'hub.write', 'hub.review'] },
   DEV: { name: 'Lập trình viên', space: 'HUB', perms: ['hub.read', 'hub.write'] },
   QA: { name: 'Kiểm thử', space: 'HUB', perms: ['hub.read', 'hub.write', 'hub.review'] },
