@@ -462,3 +462,28 @@ hubRouter.get(
     res.json({ traceability: matrix });
   }),
 );
+
+// ============ DANH MỤC TÍNH NĂNG (đọc từ state bootstrap) ============
+// Đọc document/state/features.json (67 tính năng bệnh viện + 9 HUB) để Hub hiển thị.
+// Đường dẫn qua FEATURES_FILE; chỉ đọc, không ghi. Lỗi/không có file → trả rỗng có ghi chú.
+hubRouter.get(
+  '/hub/features',
+  requirePermission('hub.read'),
+  ah(async (_req, res) => {
+    const file = process.env.FEATURES_FILE;
+    if (!file) return res.json({ features: [], hubFeatures: [], note: 'Chưa cấu hình FEATURES_FILE' });
+    try {
+      const fs = await import('node:fs/promises');
+      const raw = await fs.readFile(file, 'utf8');
+      const data = JSON.parse(raw);
+      res.json({
+        features: data.features || [],
+        hubFeatures: data.hub_features || [],
+        groups: data.groups || [],
+        counts: data.counts || null,
+      });
+    } catch {
+      res.json({ features: [], hubFeatures: [], note: 'Không đọc được features.json' });
+    }
+  }),
+);
