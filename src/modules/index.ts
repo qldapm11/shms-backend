@@ -7,6 +7,7 @@ import { aiIotRouter } from './ai-iot.router.js';
 import { reportRouter } from './report.router.js';
 import { hubRouter } from './hub.router.js';
 import { catalogRouter } from './catalog.router.js';
+import { portalRouter } from './portal.router.js';
 
 // Gắn toàn bộ router module vào nhánh /api/v1 (đã qua authMiddleware).
 export function registerModules(api: Router) {
@@ -18,4 +19,5 @@ export function registerModules(api: Router) {
   api.use(aiIotRouter);
   api.use(reportRouter);
   api.use(hubRouter);
+  api.use(portalRouter);
 }
