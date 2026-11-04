@@ -1,0 +1,480 @@
+// SHMS Prisma schema — SQLite. Hai miền: HOSPITAL + HUB, dùng chung PLATFORM.
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+// ============ PLATFORM ============
+model User {
+  id              String    @id @default(cuid())
+  username        String    @unique
+  email           String?
+  phone           String?
+  passwordHash    String
+  status          String    @default("ACTIVE") // ACTIVE | LOCKED | DISABLED
+  twofaEnabled    Boolean   @default(false)
+  twofaSecret     String?
+  mustChangePassword Boolean @default(false)
+  fullName        String
+  space           String    @default("HOSPITAL") // HOSPITAL | HUB | BOTH
+  departmentId    String?
+  department      Department? @relation(fields: [departmentId], references: [id])
+  userRoles       UserRole[]
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+}
+
+model Role {
+  id          String   @id @default(cuid())
+  code        String   @unique
+  name        String
+  space       String   // HOSPITAL | HUB
+  isDefault   Boolean  @default(false)
+  permissions RolePermission[]
+  userRoles   UserRole[]
+}
+
+model Permission {
+  id       String @id @default(cuid())
+  code     String @unique // vd "encounter.prescribe"
+  action   String
+  resource String
+  roles    RolePermission[]
+}
+
+model RolePermission {
+  roleId       String
+  permissionId String
+  role         Role       @relation(fields: [roleId], references: [id])
+  permission   Permission @relation(fields: [permissionId], references: [id])
+  @@id([roleId, permissionId])
+}
+
+model UserRole {
+  id         String    @id @default(cuid())
+  userId     String
+  roleId     String
+  dataScope  String?   // JSON mảng departmentId; null = toàn hệ thống
+  validFrom  DateTime?
+  validTo    DateTime? // A02.4 phân quyền tạm thời
+  user       User      @relation(fields: [userId], references: [id])
+  role       Role      @relation(fields: [roleId], references: [id])
+}
+
+model AuditLog {
+  id         String   @id @default(cuid())
+  userId     String?
+  action     String
+  resource   String
+  resourceId String?
+  detail     String?  // JSON
+  ip         String?
+  createdAt  DateTime @default(now())
+}
+
+model Notification {
+  id        String   @id @default(cuid())
+  userId    String
+  type      String
+  title     String
+  body      String?
+  severity  String   @default("INFO")
+  readAt    DateTime?
+  createdAt DateTime @default(now())
+}
+
+// ============ HOSPITAL: tổ chức & danh mục ============
+model Department {
+  id       String  @id @default(cuid())
+  parentId String?
+  code     String  @unique
+  name     String
+  type     String  // KHOA | PHONG | BUONG
+  status   String  @default("ACTIVE")
+  beds     Bed[]
+  users    User[]
+}
+
+model Bed {
+  id           String   @id @default(cuid())
+  code         String   @unique
+  departmentId String
+  department   Department @relation(fields: [departmentId], references: [id])
+  status       String   @default("EMPTY") // EMPTY | RESERVED | OCCUPIED | MAINT
+  admissions   Admission[]
+}
+
+model Service {
+  id       String  @id @default(cuid())
+  code     String  @unique
+  name     String
+  specialty String?
+  price    Float    @default(0)
+  bhytPrice Float   @default(0)
+  status   String   @default("ACTIVE")
+}
+
+model Drug {
+  id        String  @id @default(cuid())
+  code      String  @unique
+  name      String
+  unit      String
+  form      String?
+  activeIngredient String?
+  status    String  @default("ACTIVE")
+  items     PrescriptionItem[]
+  lots      InventoryLot[]
+}
+
+model Icd10 {
+  code   String @id
+  name   String
+  parent String?
+}
+
+model ConfigParam {
+  key   String @id
+  value String
+  scope String @default("GLOBAL")
+}
+
+model AlertThreshold {
+  id       String @id @default(cuid())
+  metric   String
+  deptId   String?
+  minVal   Float?
+  maxVal   Float?
+  severity String @default("WARN")
+}
+
+model Integration {
+  id        String   @id @default(cuid())
+  type      String   // IOT | BHYT | LIS | AI
+  name      String
+  config    String?  // JSON
+  status    String   @default("MOCK") // MOCK | REAL | DISABLED
+  syncLogs  SyncLog[]
+}
+
+model SyncLog {
+  id            String   @id @default(cuid())
+  integrationId String
+  integration   Integration @relation(fields: [integrationId], references: [id])
+  direction     String
+  status        String
+  payloadRef    String?
+  error         String?
+  createdAt     DateTime @default(now())
+}
+
+model AiRequest {
+  id          String   @id @default(cuid())
+  featureCode String
+  request     String?  // JSON
+  response    String?  // JSON
+  status      String
+  latencyMs   Int?
+  provider    String   @default("mock")
+  createdAt   DateTime @default(now())
+}
+
+// ============ HOSPITAL: người bệnh & lượt ============
+model Patient {
+  id          String   @id @default(cuid())
+  code        String   @unique
+  fullName    String
+  dob         DateTime?
+  gender      String?
+  address     String?
+  phone       String?
+  cccd        String?
+  bhytCardNo  String?
+  bhytValidTo DateTime?
+  createdAt   DateTime @default(now())
+  encounters  Encounter[]
+  appointments Appointment[]
+}
+
+model Appointment {
+  id           String   @id @default(cuid())
+  patientId    String
+  patient      Patient  @relation(fields: [patientId], references: [id])
+  departmentId String?
+  scheduledAt  DateTime
+  channel      String   @default("ONLINE") // ONLINE | COUNTER
+  status       String   @default("BOOKED")
+  createdAt    DateTime @default(now())
+}
+
+model Encounter {
+  id           String   @id @default(cuid())
+  patientId    String
+  patient      Patient  @relation(fields: [patientId], references: [id])
+  type         String   @default("OUTPATIENT") // OUTPATIENT | INPATIENT
+  departmentId String?
+  doctorId     String?
+  queueNo      Int?
+  status       String   @default("WAITING") // WAITING | IN_EXAM | DONE | ADMITTED | DISCHARGED
+  createdAt    DateTime @default(now())
+  diagnoses    Diagnosis[]
+  orders       Order[]
+  prescriptions Prescription[]
+  medicalRecords MedicalRecord[]
+  admission    Admission?
+  invoice      Invoice?
+}
+
+model Diagnosis {
+  id          String @id @default(cuid())
+  encounterId String
+  encounter   Encounter @relation(fields: [encounterId], references: [id])
+  icd10Code   String
+  type        String @default("PRIMARY")
+  note        String?
+}
+
+model Order {
+  id          String @id @default(cuid())
+  encounterId String
+  encounter   Encounter @relation(fields: [encounterId], references: [id])
+  type        String // LAB | IMAGING
+  serviceId   String?
+  status      String @default("ORDERED")
+  resultJson  String?
+  verifiedBy  String?
+  verifiedAt  DateTime?
+}
+
+model Prescription {
+  id          String   @id @default(cuid())
+  encounterId String
+  encounter   Encounter @relation(fields: [encounterId], references: [id])
+  doctorId    String?
+  status      String   @default("DRAFT") // DRAFT | SIGNED | DISPENSED
+  signedAt    DateTime?
+  correctionOf String?
+  createdAt   DateTime @default(now())
+  items       PrescriptionItem[]
+  dispense    DrugDispense?
+}
+
+model PrescriptionItem {
+  id             String @id @default(cuid())
+  prescriptionId String
+  prescription   Prescription @relation(fields: [prescriptionId], references: [id])
+  drugId         String
+  drug           Drug   @relation(fields: [drugId], references: [id])
+  dose           String
+  frequency      String
+  durationDays   Int
+  quantity       Int
+  note           String?
+}
+
+model MedicalRecord {
+  id          String   @id @default(cuid())
+  patientId   String
+  encounterId String
+  encounter   Encounter @relation(fields: [encounterId], references: [id])
+  summary     String?
+  status      String   @default("OPEN") // OPEN | SIGNED
+  signedBy    String?
+  signedAt    DateTime?
+  createdAt   DateTime @default(now())
+}
+
+model Admission {
+  id          String   @id @default(cuid())
+  encounterId String   @unique
+  encounter   Encounter @relation(fields: [encounterId], references: [id])
+  bedId       String?
+  bed         Bed?     @relation(fields: [bedId], references: [id])
+  admitAt     DateTime @default(now())
+  dischargeAt DateTime?
+  status      String   @default("ADMITTED")
+  careTasks   CareTask[]
+  vitalSigns  VitalSign[]
+}
+
+model CareTask {
+  id          String   @id @default(cuid())
+  admissionId String
+  admission   Admission @relation(fields: [admissionId], references: [id])
+  nurseId     String?
+  type        String
+  scheduledAt DateTime?
+  doneAt      DateTime?
+  note        String?
+}
+
+model VitalSign {
+  id          String   @id @default(cuid())
+  admissionId String
+  admission   Admission @relation(fields: [admissionId], references: [id])
+  bedId       String?
+  measuredAt  DateTime @default(now())
+  hr          Float?
+  spo2        Float?
+  temp        Float?
+  bpSys       Float?
+  bpDia       Float?
+  source      String   @default("MANUAL") // IOT | MANUAL
+}
+
+model MedicalDevice {
+  id           String @id @default(cuid())
+  code         String @unique
+  name         String
+  departmentId String?
+  status       String @default("ACTIVE")
+  nextMaintenance DateTime?
+}
+
+model DutyRoster {
+  id           String   @id @default(cuid())
+  departmentId String
+  staffId      String
+  shift        String
+  date         DateTime
+}
+
+// ============ HOSPITAL: viện phí & dược ============
+model Invoice {
+  id          String   @id @default(cuid())
+  encounterId String   @unique
+  encounter   Encounter @relation(fields: [encounterId], references: [id])
+  total       Float    @default(0)
+  bhytPart    Float    @default(0)
+  patientPart Float    @default(0)
+  status      String   @default("DRAFT") // DRAFT | ISSUED | PAID | PARTIAL
+  createdAt   DateTime @default(now())
+  items       InvoiceItem[]
+  payments    Payment[]
+  bhytClaim   BhytClaim?
+}
+
+model InvoiceItem {
+  id        String @id @default(cuid())
+  invoiceId String
+  invoice   Invoice @relation(fields: [invoiceId], references: [id])
+  refType   String // SERVICE | DRUG
+  refId     String
+  qty       Int    @default(1)
+  unitPrice Float  @default(0)
+  amount    Float  @default(0)
+}
+
+model Payment {
+  id        String   @id @default(cuid())
+  invoiceId String
+  invoice   Invoice  @relation(fields: [invoiceId], references: [id])
+  amount    Float
+  method    String   @default("CASH")
+  receiptNo String   @unique
+  idempotencyKey String? @unique
+  paidAt    DateTime @default(now())
+}
+
+model BhytClaim {
+  id        String   @id @default(cuid())
+  invoiceId String   @unique
+  invoice   Invoice  @relation(fields: [invoiceId], references: [id])
+  status    String   @default("DRAFT")
+  sentAt    DateTime?
+  response  String?  // JSON mock
+}
+
+model DrugDispense {
+  id             String   @id @default(cuid())
+  prescriptionId String   @unique
+  prescription   Prescription @relation(fields: [prescriptionId], references: [id])
+  dispensedBy    String?
+  dispensedAt    DateTime @default(now())
+}
+
+model InventoryLot {
+  id         String   @id @default(cuid())
+  drugId     String
+  drug       Drug     @relation(fields: [drugId], references: [id])
+  lotNo      String
+  qty        Int      @default(0)
+  expiryDate DateTime?
+  warehouse  String   @default("MAIN")
+}
+
+// ============ HUB ============
+model HubDocument {
+  id             String @id @default(cuid())
+  path           String @unique
+  title          String
+  category       String?
+  currentVersion Int    @default(1)
+  versions       HubDocumentVersion[]
+  reviews        HubReview[]
+}
+
+model HubDocumentVersion {
+  id         String   @id @default(cuid())
+  documentId String
+  document   HubDocument @relation(fields: [documentId], references: [id])
+  version    Int
+  content    String
+  authorId   String?
+  createdAt  DateTime @default(now())
+}
+
+model HubReview {
+  id         String   @id @default(cuid())
+  documentId String
+  document   HubDocument @relation(fields: [documentId], references: [id])
+  version    Int
+  reviewerId String?
+  status     String // APPROVED | CHANGES
+  comment    String?
+  createdAt  DateTime @default(now())
+}
+
+model HubTask {
+  id            String   @id @default(cuid())
+  code          String   @unique
+  title         String
+  featureIds    String?  // JSON
+  screenIds     String?  // JSON
+  type          String
+  ownerId       String?
+  reviewerId    String?
+  status        String   @default("DRAFT")
+  dependencyIds String?  // JSON
+  description   String?
+  updatedAt     DateTime @updatedAt
+}
+
+model HubDecision {
+  id        String   @id @default(cuid())
+  title     String
+  decision  String
+  authority String?
+  reason    String?
+  decidedAt DateTime @default(now())
+}
+
+model HubEvent {
+  id        String   @id @default(cuid())
+  actor     String
+  type      String
+  detail    String?
+  createdAt DateTime @default(now())
+}
+
+model HubTestCase {
+  id        String @id @default(cuid())
+  featureId String
+  steps     String?
+  expected  String?
+  result    String @default("NOT_RUN")
+  evidence  String?
+}
