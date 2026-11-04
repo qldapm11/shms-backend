@@ -634,3 +634,263 @@ adminRouter.get(
     res.json({ data: { status: 'OK', users, patients, encounters, time: new Date().toISOString() } });
   }),
 );
+
+// ============================================================
+// NHẬP TÀI KHOẢN TỪ EXCEL (A01.4) — admin.users
+// Frontend parse file Excel, gửi JSON rows.
+// ============================================================
+adminRouter.post(
+  '/admin/users/import',
+  requirePermission('admin.users'),
+  ah(async (req, res) => {
+    const body = z
+      .object({
+        rows: z
+          .array(
+            z.object({
+              username: z.string().min(1),
+              fullName: z.string().min(1),
+              password: z.string().min(6).optional(),
+              roleCode: z.string().min(1),
+              departmentCode: z.string().optional(),
+            }),
+          )
+          .min(1),
+      })
+      .parse(req.body);
+
+    const created: string[] = [];
+    const skipped: string[] = [];
+    const errors: { username: string; message: string }[] = [];
+
+    for (const row of body.rows) {
+      try {
+        const existing = await prisma.user.findUnique({ where: { username: row.username } });
+        if (existing) {
+          skipped.push(row.username);
+          continue;
+        }
+        const role = await prisma.role.findUnique({ where: { code: row.roleCode } });
+        if (!role) {
+          errors.push({ username: row.username, message: `Mã vai trò không hợp lệ: ${row.roleCode}` });
+          continue;
+        }
+        let departmentId: string | null = null;
+        if (row.departmentCode) {
+          const dep = await prisma.department.findUnique({ where: { code: row.departmentCode } });
+          if (!dep) {
+            errors.push({ username: row.username, message: `Mã khoa không hợp lệ: ${row.departmentCode}` });
+            continue;
+          }
+          departmentId = dep.id;
+        }
+        const user = await prisma.user.create({
+          data: {
+            username: row.username,
+            passwordHash: bcrypt.hashSync(row.password ?? `${row.username}123`, 10),
+            fullName: row.fullName,
+            space: role.space === 'HUB' ? 'HUB' : 'HOSPITAL',
+            mustChangePassword: !row.password,
+            departmentId,
+            userRoles: { create: [{ roleId: role.id }] },
+          },
+        });
+        created.push(user.username);
+      } catch (e) {
+        errors.push({ username: row.username, message: (e as Error).message });
+      }
+    }
+
+    await audit(req, 'USER_IMPORT', 'user', undefined, {
+      created: created.length,
+      skipped: skipped.length,
+      errors: errors.length,
+    });
+    res.json({ created, skipped, errors });
+  }),
+);
+
+// ============================================================
+// PHÂN QUYỀN TẠM THỜI (A02.4) — admin.users
+// ============================================================
+adminRouter.post(
+  '/admin/users/:id/temp-grant',
+  requirePermission('admin.users'),
+  ah(async (req, res) => {
+    const body = z
+      .object({
+        roleCode: z.string().min(1),
+        validFrom: z.coerce.date(),
+        validTo: z.coerce.date(),
+        dataScope: z.array(z.string()).optional(),
+      })
+      .parse(req.body);
+    const user = await prisma.user.findUnique({ where: { id: req.params.id } });
+    if (!user) throw new ApiError(404, 'NOT_FOUND', 'Không tìm thấy người dùng');
+    const role = await prisma.role.findUnique({ where: { code: body.roleCode } });
+    if (!role) throw new ApiError(400, 'VALIDATION_ERROR', 'Mã vai trò không hợp lệ');
+    if (body.validTo <= body.validFrom) {
+      throw new ApiError(400, 'VALIDATION_ERROR', 'validTo phải sau validFrom');
+    }
+    const userRole = await prisma.userRole.create({
+      data: {
+        userId: user.id,
+        roleId: role.id,
+        validFrom: body.validFrom,
+        validTo: body.validTo,
+        dataScope: body.dataScope ? JSON.stringify(body.dataScope) : null,
+      },
+    });
+    await audit(req, 'TEMP_GRANT', 'userRole', userRole.id, {
+      userId: user.id,
+      roleCode: body.roleCode,
+      validFrom: body.validFrom,
+      validTo: body.validTo,
+    });
+    res.status(201).json({ data: userRole });
+  }),
+);
+
+adminRouter.delete(
+  '/admin/user-roles/:id',
+  requirePermission('admin.users'),
+  ah(async (req, res) => {
+    const userRole = await prisma.userRole.findUnique({ where: { id: req.params.id } });
+    if (!userRole) throw new ApiError(404, 'NOT_FOUND', 'Không tìm thấy phân quyền');
+    await prisma.userRole.delete({ where: { id: req.params.id } });
+    await audit(req, 'REVOKE_ROLE', 'userRole', req.params.id, { userId: userRole.userId });
+    res.json({ data: { id: req.params.id } });
+  }),
+);
+
+// ============================================================
+// CẤU HÌNH QUY TRÌNH (A04.3) + MẪU IN (A04.4) — admin.config
+// Lưu trong ConfigParam theo prefix 'workflow.' / 'printtpl.'.
+// ============================================================
+adminRouter.get(
+  '/admin/workflows',
+  requirePermission('admin.config'),
+  ah(async (_req, res) => {
+    const params = await prisma.configParam.findMany({
+      where: { key: { startsWith: 'workflow.' } },
+      orderBy: { key: 'asc' },
+    });
+    const data = params.map((p) => ({ name: p.key.slice('workflow.'.length), value: p.value, scope: p.scope }));
+    res.json({ data });
+  }),
+);
+
+adminRouter.put(
+  '/admin/workflows',
+  requirePermission('admin.config'),
+  ah(async (req, res) => {
+    const body = z
+      .object({
+        name: z.string().min(1),
+        value: z.string(),
+        scope: z.string().default('GLOBAL'),
+      })
+      .parse(req.body);
+    const key = `workflow.${body.name}`;
+    const param = await prisma.configParam.upsert({
+      where: { key },
+      update: { value: body.value, scope: body.scope },
+      create: { key, value: body.value, scope: body.scope },
+    });
+    await audit(req, 'WORKFLOW_UPDATE', 'config', param.key);
+    res.json({ data: param });
+  }),
+);
+
+adminRouter.get(
+  '/admin/print-templates',
+  requirePermission('admin.config'),
+  ah(async (_req, res) => {
+    const params = await prisma.configParam.findMany({
+      where: { key: { startsWith: 'printtpl.' } },
+      orderBy: { key: 'asc' },
+    });
+    const data = params.map((p) => ({ name: p.key.slice('printtpl.'.length), value: p.value, scope: p.scope }));
+    res.json({ data });
+  }),
+);
+
+adminRouter.put(
+  '/admin/print-templates',
+  requirePermission('admin.config'),
+  ah(async (req, res) => {
+    const body = z
+      .object({
+        name: z.string().min(1),
+        value: z.string(),
+        scope: z.string().default('GLOBAL'),
+      })
+      .parse(req.body);
+    const key = `printtpl.${body.name}`;
+    const param = await prisma.configParam.upsert({
+      where: { key },
+      update: { value: body.value, scope: body.scope },
+      create: { key, value: body.value, scope: body.scope },
+    });
+    await audit(req, 'PRINTTPL_UPDATE', 'config', param.key);
+    res.json({ data: param });
+  }),
+);
+
+// ============================================================
+// THEO DÕI SAO LƯU / PHỤC HỒI (A06.4) — admin.monitor (MÔ PHỎNG)
+// Lưu bản ghi mô phỏng trong ConfigParam prefix 'backup.'.
+// ============================================================
+adminRouter.get(
+  '/admin/backups',
+  requirePermission('admin.monitor'),
+  ah(async (_req, res) => {
+    const params = await prisma.configParam.findMany({
+      where: { key: { startsWith: 'backup.' } },
+      orderBy: { key: 'desc' },
+    });
+    if (params.length === 0) {
+      return res.json({
+        data: [
+          { id: 'MOCK-1', source: 'MOCK', status: 'DONE', note: 'Bản sao lưu mô phỏng', createdAt: new Date().toISOString() },
+        ],
+        source: 'MOCK',
+      });
+    }
+    const data = params.map((p) => {
+      let parsed: unknown = p.value;
+      try {
+        parsed = JSON.parse(p.value);
+      } catch {
+        /* giữ nguyên chuỗi */
+      }
+      return { id: p.key.slice('backup.'.length), ...(typeof parsed === 'object' && parsed ? parsed : { value: parsed }) };
+    });
+    res.json({ data, source: 'MOCK' });
+  }),
+);
+
+adminRouter.post(
+  '/admin/backups',
+  requirePermission('admin.monitor'),
+  ah(async (req, res) => {
+    const body = z
+      .object({
+        note: z.string().optional(),
+        type: z.enum(['BACKUP', 'RESTORE']).default('BACKUP'),
+      })
+      .parse(req.body);
+    const id = `${Date.now()}`;
+    const record = {
+      type: body.type,
+      status: 'DONE',
+      source: 'MOCK',
+      note: body.note ?? 'Bản ghi mô phỏng',
+      createdAt: new Date().toISOString(),
+    };
+    const key = `backup.${id}`;
+    await prisma.configParam.create({ data: { key, value: JSON.stringify(record), scope: 'BACKUP' } });
+    await audit(req, 'BACKUP_CREATE', 'config', key, { type: body.type });
+    res.status(201).json({ data: { id, ...record }, source: 'MOCK' });
+  }),
+);
