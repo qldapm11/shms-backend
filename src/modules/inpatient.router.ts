@@ -94,7 +94,7 @@ inpatientRouter.post(
 // Danh sách hồ sơ nhập viện.
 inpatientRouter.get(
   '/admissions',
-  requirePermission('admission.write'),
+  requirePermission('admission.write', 'care.write', 'vitals.read'),
   ah(async (req, res) => {
     const q = z.object({ status: z.string().optional() }).parse(req.query);
     const admissions = await prisma.admission.findMany({
