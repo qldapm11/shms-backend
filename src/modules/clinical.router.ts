@@ -13,12 +13,17 @@ const signIdempotency = new Map<string, { prescriptionId: string }>();
 async function nextPatientCode(): Promise<string> {
   const year = new Date().getFullYear();
   const prefix = `PID${year}`;
-  const last = await prisma.patient.findFirst({
+  // Chỉ xét mã có phần đuôi TOÀN SỐ (bỏ qua mã demo dạng PID2026Dxxxxx).
+  const candidates = await prisma.patient.findMany({
     where: { code: { startsWith: prefix } },
-    orderBy: { code: 'desc' },
+    select: { code: true },
   });
-  const seq = last ? Number(last.code.slice(prefix.length)) + 1 : 1;
-  return `${prefix}${String(seq).padStart(6, '0')}`;
+  let max = 0;
+  for (const c of candidates) {
+    const tail = c.code.slice(prefix.length);
+    if (/^\d+$/.test(tail)) max = Math.max(max, Number(tail));
+  }
+  return `${prefix}${String(max + 1).padStart(6, '0')}`;
 }
 
 // Khoảng thời gian trong ngày hiện tại, phục vụ cấp số thứ tự theo khoa/ngày.
@@ -494,5 +499,125 @@ clinicalRouter.post(
     });
     await audit(req, 'SIGN', 'medical_record', record.id);
     res.json({ data: signed });
+  }),
+);
+
+// ============ Lịch hẹn (U02.2) — patient.read / patient.write ============
+clinicalRouter.get(
+  '/appointments',
+  requirePermission('patient.read'),
+  ah(async (req, res) => {
+    const patientId = typeof req.query.patientId === 'string' ? req.query.patientId : undefined;
+    const status = typeof req.query.status === 'string' ? req.query.status : undefined;
+    const appointments = await prisma.appointment.findMany({
+      where: { ...(patientId ? { patientId } : {}), ...(status ? { status } : {}) },
+      orderBy: { scheduledAt: 'asc' },
+      include: { patient: true },
+      take: 200,
+    });
+    res.json({ data: appointments });
+  }),
+);
+
+clinicalRouter.post(
+  '/appointments',
+  requirePermission('patient.write'),
+  ah(async (req, res) => {
+    const body = z
+      .object({
+        patientId: z.string().min(1),
+        departmentId: z.string().optional(),
+        scheduledAt: z.coerce.date(),
+        channel: z.enum(['ONLINE', 'COUNTER']).default('ONLINE'),
+      })
+      .parse(req.body);
+    const patient = await prisma.patient.findUnique({ where: { id: body.patientId } });
+    if (!patient) throw new ApiError(404, 'NOT_FOUND', 'Không tìm thấy người bệnh');
+    const appointment = await prisma.appointment.create({
+      data: {
+        patientId: body.patientId,
+        departmentId: body.departmentId ?? null,
+        scheduledAt: body.scheduledAt,
+        channel: body.channel,
+        status: 'BOOKED',
+      },
+    });
+    await audit(req, 'CREATE', 'appointment', appointment.id, { patientId: body.patientId });
+    res.status(201).json({ data: appointment });
+  }),
+);
+
+clinicalRouter.post(
+  '/appointments/:id/cancel',
+  requirePermission('patient.write'),
+  ah(async (req, res) => {
+    const appointment = await prisma.appointment.findUnique({ where: { id: req.params.id } });
+    if (!appointment) throw new ApiError(404, 'NOT_FOUND', 'Không tìm thấy lịch hẹn');
+    if (appointment.status === 'CANCELLED') throw new ApiError(409, 'CONFLICT', 'Lịch hẹn đã hủy');
+    if (appointment.status === 'DONE') throw new ApiError(409, 'CONFLICT', 'Lịch hẹn đã tiếp nhận');
+    const updated = await prisma.appointment.update({
+      where: { id: appointment.id },
+      data: { status: 'CANCELLED' },
+    });
+    await audit(req, 'CANCEL', 'appointment', appointment.id);
+    res.json({ data: updated });
+  }),
+);
+
+// Tiếp nhận từ lịch hẹn: tạo lượt khám WAITING + cấp số thứ tự, lịch hẹn chuyển DONE.
+clinicalRouter.post(
+  '/appointments/:id/check-in',
+  requirePermission('patient.write'),
+  ah(async (req, res) => {
+    const appointment = await prisma.appointment.findUnique({ where: { id: req.params.id } });
+    if (!appointment) throw new ApiError(404, 'NOT_FOUND', 'Không tìm thấy lịch hẹn');
+    if (appointment.status === 'DONE') throw new ApiError(409, 'CONFLICT', 'Lịch hẹn đã tiếp nhận');
+    if (appointment.status === 'CANCELLED') throw new ApiError(409, 'CONFLICT', 'Lịch hẹn đã hủy');
+
+    const { start, end } = todayRange();
+    const result = await prisma.$transaction(async (tx) => {
+      const top = await tx.encounter.findFirst({
+        where: { departmentId: appointment.departmentId ?? null, createdAt: { gte: start, lt: end } },
+        orderBy: { queueNo: 'desc' },
+      });
+      const queueNo = (top?.queueNo ?? 0) + 1;
+      const encounter = await tx.encounter.create({
+        data: {
+          patientId: appointment.patientId,
+          type: 'OUTPATIENT',
+          departmentId: appointment.departmentId ?? undefined,
+          queueNo,
+          status: 'WAITING',
+        },
+      });
+      await tx.appointment.update({ where: { id: appointment.id }, data: { status: 'DONE' } });
+      return { encounter, queueNo };
+    });
+    await audit(req, 'CHECK_IN', 'appointment', appointment.id, {
+      encounterId: result.encounter.id,
+      queueNo: result.queueNo,
+    });
+    res.status(201).json({ data: result.encounter });
+  }),
+);
+
+// ============ Lịch sử điều trị theo người bệnh (U03.2) — encounter.read ============
+clinicalRouter.get(
+  '/patients/:id/history',
+  requirePermission('encounter.read'),
+  ah(async (req, res) => {
+    const patient = await prisma.patient.findUnique({ where: { id: req.params.id } });
+    if (!patient) throw new ApiError(404, 'NOT_FOUND', 'Không tìm thấy người bệnh');
+    const encounters = await prisma.encounter.findMany({
+      where: { patientId: patient.id },
+      orderBy: { createdAt: 'desc' },
+      include: {
+        diagnoses: true,
+        orders: true,
+        prescriptions: { include: { items: { include: { drug: true } } } },
+        medicalRecords: true,
+      },
+    });
+    res.json({ data: { patient, encounters } });
   }),
 );
