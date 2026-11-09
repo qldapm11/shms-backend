@@ -1,0 +1,14 @@
+node_modules
+dist
+*.log
+.env
+.env.*
+!.env.example
+dev.db
+dev.db-journal
+*.test.ts
+*.spec.ts
+coverage
+.vscode
+.idea
+.DS_Store
